@@ -9,6 +9,15 @@ import { getSessionPath } from './sessionPath';
 
 const API_PATH = '/api/session-data';
 
+async function readErrorBodySafe(res: Response): Promise<string> {
+  try {
+    const text = await res.text();
+    return text ? ` - ${text}` : '';
+  } catch {
+    return '';
+  }
+}
+
 /** Build the full API URL for a file path, scoped under current session's /apps/ directory */
 function apiUrl(filePath: string, action?: string): string {
   const session = getSessionPath();
@@ -77,14 +86,23 @@ export async function putTextFilesByJSON(data: {
   const promises = data.files.map(async (file) => {
     const fullPath = file.path ? `${file.path}/${file.name}` : file.name || '';
     if (!fullPath) return;
+    const url = apiUrl(fullPath);
+    let res: Response;
     try {
-      await fetch(apiUrl(fullPath), {
+      res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain' },
         body: file.content || '',
       });
     } catch (e) {
-      console.warn('[diskStorage] putTextFilesByJSON write failed:', e);
+      throw new Error(`[diskStorage] write failed (${fullPath}): ${String(e)}`);
+    }
+
+    if (!res.ok) {
+      const body = await readErrorBodySafe(res);
+      throw new Error(
+        `[diskStorage] write failed (${fullPath}): HTTP ${res.status} ${res.statusText}${body}`,
+      );
     }
   });
   await Promise.all(promises);
@@ -106,11 +124,17 @@ export async function putBinaryFile(
   for (let i = 0; i < binary.length; i++) {
     bytes[i] = binary.charCodeAt(i);
   }
-  await fetch(apiUrl(filePath), {
+  const res = await fetch(apiUrl(filePath), {
     method: 'POST',
     headers: { 'Content-Type': mimeType },
     body: bytes,
   });
+  if (!res.ok) {
+    const body = await readErrorBodySafe(res);
+    throw new Error(
+      `[diskStorage] binary write failed (${filePath}): HTTP ${res.status} ${res.statusText}${body}`,
+    );
+  }
 }
 
 export async function deleteFilesByPaths(data: { file_paths: string[] }): Promise<void> {

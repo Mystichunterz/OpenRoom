@@ -8,7 +8,7 @@ import autoprefixer from 'autoprefixer';
 import { sentryVitePlugin } from '@sentry/vite-plugin';
 import * as fs from 'fs';
 import * as os from 'os';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import { generateLogFileName, createLogMiddleware } from './src/lib/logPlugin';
 import { appGeneratorPlugin } from './src/lib/appGeneratorPlugin';
 
@@ -158,7 +158,7 @@ function sessionDataPlugin(): Plugin {
           req.on('end', () => {
             try {
               const buf = Buffer.concat(chunks);
-              const dir = filePath.substring(0, filePath.lastIndexOf('/'));
+              const dir = dirname(filePath);
               fs.mkdirSync(dir, { recursive: true });
               const ct = (req.headers['content-type'] || '').toLowerCase();
               if (

@@ -5,6 +5,7 @@
 
 import * as idb from './diskStorage';
 import { getSourceDirToAppName } from './appRegistry';
+import { getSessionPath } from './sessionPath';
 
 // Eager import — inlined as strings at build time
 const metaFiles: Record<string, string> = import.meta.glob(
@@ -19,11 +20,15 @@ const metaFiles: Record<string, string> = import.meta.glob(
 
 const DIR_TO_APP_NAME = getSourceDirToAppName();
 
-let seeded = false;
+const SEEDED_SESSION_KEYS = new Set<string>();
 
-export async function seedMetaFiles(): Promise<void> {
-  if (seeded) return;
-  seeded = true;
+function getSessionKey(): string {
+  return getSessionPath() || '__default__';
+}
+
+export async function seedMetaFiles(options?: { force?: boolean }): Promise<void> {
+  const sessionKey = getSessionKey();
+  if (!options?.force && SEEDED_SESSION_KEYS.has(sessionKey)) return;
 
   const files: Array<{ path: string; name: string; content: string }> = [];
 
@@ -36,8 +41,17 @@ export async function seedMetaFiles(): Promise<void> {
     files.push({ path: `apps/${appName}`, name: fileName, content });
   }
 
-  if (files.length > 0) {
+  if (files.length === 0) {
+    SEEDED_SESSION_KEYS.add(sessionKey);
+    return;
+  }
+
+  try {
     await idb.putTextFilesByJSON({ files });
-    console.info(`[seedMeta] Seeded ${files.length} meta files to disk`);
+    SEEDED_SESSION_KEYS.add(sessionKey);
+    console.info(`[seedMeta] Seeded ${files.length} meta files to disk (session=${sessionKey})`);
+  } catch (err) {
+    SEEDED_SESSION_KEYS.delete(sessionKey);
+    console.error(`[seedMeta] Failed to seed meta files (session=${sessionKey})`, err);
   }
 }

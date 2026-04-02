@@ -87,6 +87,90 @@ const PIECE_SYMBOLS: Record<string, string> = {
 const inBounds = (r: number, c: number): boolean => r >= 0 && r < 8 && c >= 0 && c < 8;
 const posEq = (a: Pos, b: Pos): boolean => a[0] === b[0] && a[1] === b[1];
 const toNotation = (r: number, c: number): string => String.fromCharCode(97 + c) + String(8 - r);
+const fromNotation = (s: string): Pos | null => {
+  const normalized = s.trim().toLowerCase();
+  if (!/^[a-h][1-8]$/.test(normalized)) return null;
+  const col = normalized.charCodeAt(0) - 97;
+  const row = 8 - Number(normalized[1]);
+  return [row, col];
+};
+
+const nullablePosEq = (a: Pos | null, b: Pos | null): boolean => {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  return posEq(a, b);
+};
+
+const nullableMoveEq = (
+  a: { from: Pos; to: Pos } | null,
+  b: { from: Pos; to: Pos } | null,
+): boolean => {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  return posEq(a.from, b.from) && posEq(a.to, b.to);
+};
+
+const boardEq = (a: Board, b: Board): boolean => {
+  for (let r = 0; r < 8; r++) {
+    for (let c = 0; c < 8; c++) {
+      const pa = a[r][c];
+      const pb = b[r][c];
+      if (!pa && !pb) continue;
+      if (!pa || !pb) return false;
+      if (pa.type !== pb.type || pa.color !== pb.color) return false;
+    }
+  }
+  return true;
+};
+
+function validateBlackMoveOnState(state: GameState, from: Pos, to: Pos): string | null {
+  if (state.currentTurn !== 'b') {
+    return `it is not black's turn (currentTurn=${state.currentTurn})`;
+  }
+  if (!inBounds(from[0], from[1]) || !inBounds(to[0], to[1])) {
+    return 'coordinates are out of board range';
+  }
+
+  const movingPiece = state.board[from[0]][from[1]];
+  if (!movingPiece) {
+    return `no piece at ${toNotation(from[0], from[1])}`;
+  }
+  if (movingPiece.color !== 'b') {
+    return `agent attempted to move a ${movingPiece.color} piece from ${toNotation(from[0], from[1])}`;
+  }
+
+  const legalTargets = legalMovesFor(
+    state.board,
+    from[0],
+    from[1],
+    state.castlingRights,
+    state.enPassantTarget,
+  );
+  if (!legalTargets.some((t) => posEq(t, to))) {
+    return `illegal move ${toNotation(from[0], from[1])} -> ${toNotation(to[0], to[1])}`;
+  }
+
+  return null;
+}
+
+function statesEquivalentForAppliedMove(expected: GameState, actual: GameState): boolean {
+  return (
+    boardEq(expected.board, actual.board) &&
+    expected.currentTurn === actual.currentTurn &&
+    expected.castlingRights.wK === actual.castlingRights.wK &&
+    expected.castlingRights.wQ === actual.castlingRights.wQ &&
+    expected.castlingRights.bK === actual.castlingRights.bK &&
+    expected.castlingRights.bQ === actual.castlingRights.bQ &&
+    nullablePosEq(expected.enPassantTarget, actual.enPassantTarget) &&
+    expected.halfMoveClock === actual.halfMoveClock &&
+    expected.gameStatus === actual.gameStatus &&
+    expected.winner === actual.winner &&
+    expected.gameId === actual.gameId &&
+    expected.isAgentThinking === actual.isAgentThinking &&
+    expected.moveHistory.length === actual.moveHistory.length &&
+    nullableMoveEq(expected.lastMove, actual.lastMove)
+  );
+}
 
 // ============ Initial Board ============
 function createInitialBoard(): Board {
@@ -613,35 +697,102 @@ const Chess: React.FC = () => {
     [saveFile, syncToCloud],
   );
 
-  // Refresh from cloud
-  const refreshCloud = useCallback(async () => {
+  const applyGameState = useCallback((st: GameState) => {
+    setGame(st);
+    setSelectedPos(null);
+    setValidTargets([]);
+  }, []);
+
+  const loadCloudState = useCallback(async (): Promise<GameState | null> => {
     try {
       await initFromCloud();
-      const st = loadFromFS();
-      if (st) {
-        setGame(st);
-        setSelectedPos(null);
-        setValidTargets([]);
-      }
+      return loadFromFS();
     } catch (e) {
-      console.warn('[Chess] refreshCloud error:', e);
+      console.warn('[Chess] loadCloudState error:', e);
+      return null;
     }
   }, [initFromCloud, loadFromFS]);
+
+  // Refresh from cloud
+  const refreshCloud = useCallback(
+    async (options?: { apply?: boolean }): Promise<GameState | null> => {
+      const st = await loadCloudState();
+      if (st && options?.apply !== false) {
+        applyGameState(st);
+      }
+      return st;
+    },
+    [applyGameState, loadCloudState],
+  );
 
   // Agent action handler
   const handleAgent = useCallback(
     async (action: CharacterAppAction): Promise<string> => {
       switch (action.action_type) {
-        case 'AGENT_MOVE':
-        case 'SYNC_STATE':
-        case 'NEW_GAME':
-          await refreshCloud();
+        case 'AGENT_MOVE': {
+          if (!game) {
+            const loaded = await refreshCloud();
+            return loaded ? 'success' : 'error: chess state is unavailable';
+          }
+
+          const fromParam = action.params?.from;
+          const toParam = action.params?.to;
+
+          // Preferred path: apply explicit AGENT_MOVE coordinates locally
+          if (fromParam && toParam) {
+            const from = fromNotation(fromParam);
+            const to = fromNotation(toParam);
+            if (!from || !to) {
+              return `error: invalid AGENT_MOVE coordinates from="${fromParam}" to="${toParam}"`;
+            }
+
+            const invalidReason = validateBlackMoveOnState(game, from, to);
+            if (invalidReason) {
+              return `error: invalid AGENT_MOVE - ${invalidReason}`;
+            }
+
+            const nextState = executeMove(game, from, to);
+            applyGameState(nextState);
+            await persist(nextState);
+            return 'success';
+          }
+
+          // Fallback path for legacy payloads without from/to: sync from cloud then validate
+          const synced = await refreshCloud({ apply: false });
+          if (!synced) {
+            return 'error: failed to load chess state from cloud';
+          }
+
+          if (game.currentTurn === 'b') {
+            const lm = synced.lastMove;
+            if (!lm) {
+              return 'error: invalid AGENT_MOVE state - missing lastMove';
+            }
+
+            const invalidReason = validateBlackMoveOnState(game, lm.from, lm.to);
+            if (invalidReason) {
+              return `error: invalid AGENT_MOVE state - ${invalidReason}`;
+            }
+
+            const expected = executeMove(game, lm.from, lm.to);
+            if (!statesEquivalentForAppliedMove(expected, synced)) {
+              return 'error: invalid AGENT_MOVE state - cloud state does not match a legal black move';
+            }
+          }
+
+          applyGameState(synced);
           return 'success';
+        }
+        case 'SYNC_STATE':
+        case 'NEW_GAME': {
+          const loaded = await refreshCloud();
+          return loaded ? 'success' : 'error: failed to load chess state from cloud';
+        }
         default:
           return `error: unknown action_type ${action.action_type}`;
       }
     },
-    [refreshCloud],
+    [applyGameState, game, persist, refreshCloud],
   );
   useAgentActionListener(APP_ID, handleAgent);
 

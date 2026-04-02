@@ -619,8 +619,8 @@ const ChatPanel: React.FC<{
     // Re-seed prologue and opening replies
     seedPrologue();
 
-    // Re-seed meta files
-    await seedMetaFiles();
+    // Re-seed meta files for current session after reset
+    await seedMetaFiles({ force: true });
   }, [modCollection, seedPrologue]);
 
   useEffect(() => {
